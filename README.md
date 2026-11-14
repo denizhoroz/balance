@@ -1,4 +1,4 @@
-<img width="1110" height="633" alt="Adsız" src="https://github.com/user-attachments/assets/d060ee62-c6fa-40d1-9ace-86f66f6566f8" />
+<img width="1110" height="633" alt="Balance App Overview" src="https://github.com/user-attachments/assets/e318f90e-8b66-4484-9066-78cc79e19862" />
 
 # Balance
 
