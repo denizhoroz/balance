@@ -1,0 +1,21 @@
+{
+  "fiat": [
+    { "url": "https://api.frankfurter.dev/v1/latest?base=EUR&symbols=USD,GBP,TRY,JPY", "format": "frankfurter" }
+  ],
+  "metal": [
+    { "url": "https://api.gold-api.com/price/{metal}", "format": "gold-api" },
+    { "url": "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd,xau,xag", "format": "coingecko" },
+    { "url": "https://latest.currency-api.pages.dev/v1/currencies/usd.min.json", "format": "currency-api" },
+    { "url": "https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@latest/v1/currencies/usd.min.json", "format": "currency-api" }
+  ],
+  "crypto": [
+    { "url": "https://api.coingecko.com/api/v3/simple/price?vs_currencies=usd&ids={ids}", "format": "coingecko" }
+  ],
+  "fiat_day": [
+    { "url": "https://api.frankfurter.dev/v1/{day}?base=EUR&symbols=USD,GBP,TRY,JPY", "format": "frankfurter" }
+  ],
+  "prices_day": [
+    { "url": "https://{day}.currency-api.pages.dev/v1/currencies/usd.min.json", "format": "currency-api" },
+    { "url": "https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@{day}/v1/currencies/usd.min.json", "format": "currency-api" }
+  ]
+}

@@ -1,0 +1,23 @@
+# Claude Code
+.claude/
+
+# Build output
+target/
+**/*.rs.bk
+dist/
+
+# User data and price cache (made by the app)
+db/
+.cache/
+~$*.xlsx
+
+# Editors / IDEs
+.vscode/
+.idea/
+*.swp
+*~
+
+# Windows
+Thumbs.db
+desktop.ini
+$RECYCLE.BIN/
