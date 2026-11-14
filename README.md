@@ -1,3 +1,5 @@
+<img width="1110" height="633" alt="Adsız" src="https://github.com/user-attachments/assets/d060ee62-c6fa-40d1-9ace-86f66f6566f8" />
+
 # Balance
 
 A small Windows desktop app for tracking incomes, expenses and assets. Data is stored in an Excel workbook (`db\balance.xlsx`).
