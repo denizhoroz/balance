@@ -44,6 +44,16 @@ pub enum Field {
     Value,
     /// Picked from the list's currencies; the editor text is a code prefix.
     Currency,
+    /// A saved holding's Add / Remove amount (asset view). Not a row value:
+    /// its text is kept by the session until [`Session::adjust`] applies it.
+    Amount(Adjust),
+}
+
+/// Which way an amount changes a holding.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Adjust {
+    Add,
+    Remove,
 }
 
 /// One table row. Rows may be incomplete while being edited; only complete
@@ -66,9 +76,10 @@ pub struct Row {
 /// the value is parsed with the currency's decimals).
 const ACTION_FIELDS: [Field; 3] = [Field::Name, Field::Date, Field::Value];
 
-/// Fields of a saved asset that can still change, for its whole holding.
-/// Value, type and date are fixed once the asset is assigned.
-const HOLDING_FIELDS: [Field; 2] = [Field::Name, Field::Category];
+/// Fields of a saved asset that can still change, for its whole holding,
+/// then its Add / Remove amounts. Value, type and date are fixed once the
+/// asset is assigned: the amounts change the holding by a new snapshot.
+const HOLDING_FIELDS: [Field; 4] = [Field::Name, Field::Category, Field::Amount(Adjust::Add), Field::Amount(Adjust::Remove)];
 
 /// Field order of a draft asset, as laid out in the asset view: name and
 /// category on the left, then type (currency), value and date on the right.
@@ -86,7 +97,8 @@ enum RowKind {
     /// incomplete until the view is left.
     Draft,
     /// A saved asset: only its holding's name and category change, for every
-    /// snapshot of the holding; value, type and date are fixed.
+    /// snapshot of the holding; value, type and date are fixed. Its Add /
+    /// Remove amounts append a new snapshot instead.
     Saved,
 }
 
@@ -123,7 +135,7 @@ impl RowKind {
                 Field::Currency => row.ask_currency,
                 Field::Category => row.category.is_empty(),
                 Field::Value => row.value.is_none(),
-                Field::Date => false,
+                Field::Date | Field::Amount(_) => false,
             }),
             RowKind::Saved => None,
         }
@@ -254,6 +266,9 @@ pub struct Session {
     editing: Option<Edit>,
     /// What the asset view is open on, if it is.
     detail: Option<Detail>,
+    /// Text of the asset view's Add and Remove amounts; cleared when the
+    /// view opens, closes, or applies one.
+    amounts: [String; 2],
     /// Currency for loaded rows that have none (legacy workbooks).
     default_currency: Currency,
     /// The last load filled in default currencies; rewrite the workbook so
@@ -279,6 +294,7 @@ impl Session {
             next_id: 0,
             editing: None,
             detail: None,
+            amounts: Default::default(),
             default_currency,
             migrate: false,
         };
@@ -342,6 +358,31 @@ impl Session {
         match self.detail {
             Some(Detail::Draft(id)) => Some(id),
             _ => None,
+        }
+    }
+
+    /// The text kept for an Add / Remove amount (shown while its editor is
+    /// closed).
+    pub fn amount_text(&self, dir: Adjust) -> &str {
+        &self.amounts[dir as usize]
+    }
+
+    /// The holding's value after applying `text` as a `dir` amount on
+    /// `today`, or `None` when it cannot be applied: no saved asset in view,
+    /// an empty, invalid or zero amount, or removing more than is held.
+    pub fn adjusted(&self, dir: Adjust, text: &str, today: NaiveDate) -> Option<Cents> {
+        let Some(Detail::Row(id)) = self.detail else { return None };
+        let row = &self.assets[self.row_index(List::Asset, id)?];
+        let amount = parse_amount_dec(text, row.currency.decimals()).filter(|&v| v > 0)?;
+        // What the holding is worth today (nothing if not held by then).
+        let held = assets::current(&self.ledger.assets, today)
+            .into_iter()
+            .map(|i| &self.ledger.assets[i])
+            .find(|s| s.name == row.name)
+            .map_or(0, |s| s.value);
+        match dir {
+            Adjust::Add => held.checked_add(amount),
+            Adjust::Remove => held.checked_sub(amount).filter(|&v| v >= 0),
         }
     }
 
@@ -525,9 +566,47 @@ impl Session {
         if self.editing.is_some() {
             self.commit_and_close(editor_text);
         }
+        self.amounts = Default::default();
         if let Some(Detail::Draft(id)) = self.detail.take() {
             self.leave_row(List::Asset, id);
         }
+    }
+
+    /// Clear (×) next to an Add / Remove amount: empties its text, closing
+    /// its editor if open.
+    pub fn clear_amount(&mut self, dir: Adjust) {
+        if self.editing.is_some_and(|e| e.field == Field::Amount(dir)) {
+            self.end_edit();
+        }
+        self.amounts[dir as usize].clear();
+    }
+
+    /// Add / Remove pressed (button or Enter in its amount): commits the open
+    /// field, then records the holding's new value as a new snapshot dated
+    /// `today`, so earlier days keep their values. The view moves to the new
+    /// row, or closes when nothing is left (the holding is sold). An amount
+    /// that cannot be applied (see [`Session::adjusted`]) changes nothing.
+    pub fn adjust(&mut self, dir: Adjust, today: NaiveDate, editor_text: &str) -> Step {
+        if self.editing.is_some() {
+            self.commit_and_close(editor_text);
+        }
+        let Some(value) = self.adjusted(dir, self.amount_text(dir), today) else { return Step::Close };
+        let Some(Detail::Row(id)) = self.detail else { return Step::Close };
+        let Some(ix) = self.row_index(List::Asset, id) else { return Step::Close };
+        let (name, category, currency) = {
+            let r = &self.assets[ix];
+            (r.name.clone(), r.category.clone(), r.currency)
+        };
+        let row = self.make_row(name, category, Some(value), currency, today);
+        let new = row.id;
+        self.assets.push(row);
+        // Stable: after the day's existing rows, so this one wins the day.
+        self.assets.sort_by_key(|r| r.date);
+        self.amounts = Default::default();
+        self.detail = (value != 0).then_some(Detail::Row(new));
+        self.rebuild();
+        self.persist();
+        Step::Close
     }
 
     /// The editing rules row `id` of `list` follows.
@@ -616,6 +695,7 @@ impl Session {
                 "0",
             ),
             Field::Currency => (row.currency.code().to_string(), "USD"),
+            Field::Amount(dir) => (self.amounts[dir as usize].clone(), "amount"),
         };
         self.editing = Some(edit);
         Some(Prefill { text, placeholder })
@@ -627,6 +707,10 @@ impl Session {
         let Some(edit) = self.editing else { return };
         let Some(ix) = self.row_index(edit.list, edit.id) else { return };
         let text = editor_text.trim().to_string();
+        if let Field::Amount(dir) = edit.field {
+            self.amounts[dir as usize] = text;
+            return;
+        }
         if self.kind(edit.list, edit.id) == RowKind::Saved {
             self.commit_holding(ix, edit.field, text);
             self.rebuild();
@@ -654,6 +738,7 @@ impl Session {
                 }
                 row.ask_currency = false;
             }
+            Field::Amount(_) => unreachable!("amounts are kept above"),
         }
         self.rebuild();
     }
@@ -692,8 +777,12 @@ impl Session {
         self.end_edit();
     }
 
-    /// Esc: drop the editor text.
-    pub fn cancel(&mut self) {
+    /// Esc: drop the editor text. An Add / Remove amount keeps it instead
+    /// (Esc only closes its editor; nothing is applied).
+    pub fn cancel(&mut self, editor_text: &str) {
+        if self.editing.is_some_and(|e| matches!(e.field, Field::Amount(_))) {
+            self.commit(editor_text);
+        }
         self.end_edit();
     }
 
@@ -880,7 +969,7 @@ mod tests {
         assert_eq!(s.draft().map(|r| r.name.as_str()), Some("ETF"));
         let id = s.draft().unwrap().id;
         assert!(s.start_edit(Edit { list: List::Asset, id, field: Field::Value }, "").is_some());
-        s.cancel();
+        s.cancel("");
         assert!(s.draft().is_some());
         s.leave_asset_view("");
         assert!(s.rows(List::Asset).is_empty());
@@ -963,6 +1052,118 @@ mod tests {
         for id in [old, tie_first, future] {
             assert_ne!(s.holding_row("ETF", today()), Some(id));
         }
+        cleanup(&path);
+    }
+
+    /// Saves a holding dated `date` through the draft flow and opens the
+    /// asset view on it; returns its row id.
+    fn open_holding(s: &mut Session, name: &str, value: &str, date: &str) -> u64 {
+        open_of(s.open_draft(today(), Currency::Usd, ""));
+        for text in [name, "Stocks", "usd", value] {
+            s.enter(text);
+        }
+        let id = s.draft().unwrap().id;
+        s.start_edit(Edit { list: List::Asset, id, field: Field::Date }, "");
+        s.enter(date);
+        s.leave_asset_view("");
+        s.open_asset(id, "");
+        id
+    }
+
+    /// Types `text` into a box's amount and presses its button.
+    fn press(s: &mut Session, dir: Adjust, text: &str) -> Step {
+        let id = s.asset_view().unwrap().row.unwrap();
+        assert!(s.start_edit(Edit { list: List::Asset, id, field: Field::Amount(dir) }, "").is_some());
+        s.adjust(dir, today(), text)
+    }
+
+    fn values(s: &Session) -> Vec<(Cents, NaiveDate)> {
+        s.ledger().assets.iter().map(|a| (a.value, a.date)).collect()
+    }
+
+    #[test]
+    fn add_and_remove_append_snapshots_dated_today() {
+        let path = scratch("adjust");
+        let mut s = Session::new(path.clone(), Currency::Usd);
+        open_holding(&mut s, "ETF", "10", "01.01.2026");
+        assert_eq!(press(&mut s, Adjust::Add, "5,50"), Step::Close);
+        // Same day again: another row, the later one wins.
+        assert_eq!(press(&mut s, Adjust::Remove, "3"), Step::Close);
+        assert_eq!(values(&s), [(1_000, d(2026, 1, 1)), (1_550, today()), (1_250, today())]);
+        // Earlier days keep their value; the view follows the newest row.
+        assert_eq!(assets::holdings_total(&s.ledger().assets, d(2026, 6, 1), crate::core::rates::Fx::new(Currency::Usd, None)), Some(1_000));
+        let view = s.asset_view().unwrap();
+        assert_eq!((view.value, view.date, view.row), (Some(1_250), Some(today()), s.holding_row("ETF", today())));
+        assert_eq!(s.amount_text(Adjust::Add), "");
+        assert!(!s.unsaved());
+        assert_eq!(store::load(&path, Currency::Usd).unwrap().ledger.assets.len(), 3);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn unusable_amounts_change_nothing() {
+        let path = scratch("adjust-bad");
+        let mut s = Session::new(path.clone(), Currency::Usd);
+        open_holding(&mut s, "ETF", "10", "01.01.2026");
+        for text in ["", "abc", "0", "10,01"] {
+            assert_eq!(press(&mut s, Adjust::Remove, text), Step::Close);
+            assert_eq!(s.adjusted(Adjust::Remove, text, today()), None);
+        }
+        assert_eq!(s.ledger().assets.len(), 1);
+        // The typed text stays for another try.
+        assert_eq!(s.amount_text(Adjust::Remove), "10,01");
+        cleanup(&path);
+    }
+
+    #[test]
+    fn removing_everything_sells_and_closes_the_view() {
+        let path = scratch("adjust-sell");
+        let mut s = Session::new(path.clone(), Currency::Usd);
+        open_holding(&mut s, "ETF", "10", "01.01.2026");
+        assert_eq!(press(&mut s, Adjust::Remove, "10"), Step::Close);
+        assert_eq!(values(&s), [(1_000, d(2026, 1, 1)), (0, today())]);
+        assert_eq!(s.asset_view(), None);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn amount_text_survives_esc_and_click_away() {
+        let path = scratch("adjust-keep");
+        let mut s = Session::new(path.clone(), Currency::Usd);
+        let id = open_holding(&mut s, "ETF", "10", "01.01.2026");
+        let add = Edit { list: List::Asset, id, field: Field::Amount(Adjust::Add) };
+        s.start_edit(add, "");
+        s.cancel("2");
+        assert_eq!(s.amount_text(Adjust::Add), "2");
+        let p = s.start_edit(add, "").unwrap();
+        assert_eq!((p.text.as_str(), p.placeholder), ("2", "amount"));
+        s.commit_and_close("4");
+        assert_eq!(s.amount_text(Adjust::Add), "4");
+        // Nothing applied by either.
+        assert_eq!(s.ledger().assets.len(), 1);
+        // Clear empties it (closing its editor), and only its own box.
+        s.start_edit(Edit { list: List::Asset, id, field: Field::Amount(Adjust::Remove) }, "");
+        s.commit_and_close("1");
+        s.start_edit(add, "");
+        s.clear_amount(Adjust::Add);
+        assert_eq!((s.amount_text(Adjust::Add), s.amount_text(Adjust::Remove), s.editing()), ("", "1", None));
+        // Leaving the view forgets it.
+        s.leave_asset_view("");
+        assert_eq!(s.amount_text(Adjust::Remove), "");
+        cleanup(&path);
+    }
+
+    #[test]
+    fn draft_has_no_amounts() {
+        let path = scratch("adjust-draft");
+        let mut s = Session::new(path.clone(), Currency::Usd);
+        open_of(s.open_draft(today(), Currency::Usd, ""));
+        let id = s.draft().unwrap().id;
+        for dir in [Adjust::Add, Adjust::Remove] {
+            assert_eq!(s.start_edit(Edit { list: List::Asset, id, field: Field::Amount(dir) }, ""), None);
+            assert_eq!(s.adjusted(dir, "1", today()), None);
+        }
+        assert!(!s.asset_view().unwrap().editable.contains(&Field::Amount(Adjust::Add)));
         cleanup(&path);
     }
 
@@ -1111,11 +1312,15 @@ mod tests {
         let id = s.rows(List::Asset)[0].id;
         let edit = |field| Edit { list: List::Asset, id, field };
 
-        // Tab stays on name and category.
+        // Tab goes name, category, then the Add / Remove amounts.
         let text = s.start_edit(edit(Field::Name), "").unwrap().text;
         let (e, p) = open_of(s.tab(false, &text));
         assert_eq!(e.field, Field::Category);
-        assert_eq!(s.tab(false, &p.text), Step::Close);
+        let (e, _) = open_of(s.tab(false, &p.text));
+        assert_eq!(e.field, Field::Amount(Adjust::Add));
+        let (e, _) = open_of(s.tab(false, ""));
+        assert_eq!(e.field, Field::Amount(Adjust::Remove));
+        assert_eq!(s.tab(false, ""), Step::Close);
 
         // Rename and re-categorise every ETF snapshot.
         s.start_edit(edit(Field::Name), "");
@@ -1337,7 +1542,7 @@ mod tests {
         let edit = |field| Edit { list: List::Asset, id, field };
         let p = s.start_edit(edit(Field::Value), "").unwrap();
         assert_eq!(p.text, "0,00512");
-        s.cancel();
+        s.cancel("");
 
         // Switching the draft's type keeps the shown number, rounded to the
         // new currency's decimals.

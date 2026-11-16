@@ -20,6 +20,8 @@ impl BalanceApp {
             Field::Date => ("Date", p.fg),
             Field::Value => ("Value", p.list(list)),
             Field::Currency => ("Currency", p.fg),
+            // Asset view only; never in the table popup.
+            Field::Amount(_) => ("Amount", p.fg),
         };
         let field_row = row().gap(px(8.)).px(px(6.)).child(div().flex_none().text_size(px(11.)).text_color(p.muted).child(label)).child(
             div()

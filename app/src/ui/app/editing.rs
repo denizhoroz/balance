@@ -4,7 +4,7 @@ use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::*;
 
 use super::{BalanceApp, today};
-use crate::core::session::{Edit, Field, List, Step};
+use crate::core::session::{Adjust, Edit, Field, List, Step};
 use crate::core::settings::Currency;
 
 impl BalanceApp {
@@ -14,9 +14,10 @@ impl BalanceApp {
         let editor = cx.new(|cx| InputState::new(window, cx).context_menu(false));
         let sub = cx.subscribe_in(&editor, window, |this, _, ev: &InputEvent, window, cx| match ev {
             InputEvent::PressEnter { .. } => this.on_editor_enter(window, cx),
-            // Currency step highlights the item matching the typed prefix.
+            // Currency step highlights the item matching the typed prefix;
+            // an Add / Remove button follows whether its amount applies.
             InputEvent::Change => {
-                if this.session.editing().is_some_and(|e| e.field == Field::Currency) {
+                if this.session.editing().is_some_and(|e| matches!(e.field, Field::Currency | Field::Amount(_))) {
                     cx.notify();
                 }
             }
@@ -30,7 +31,7 @@ impl BalanceApp {
         (editor, sub)
     }
 
-    pub(super) fn editor_text(&self, cx: &App) -> String {
+    pub(crate) fn editor_text(&self, cx: &App) -> String {
         self.editor.read(cx).value().to_string()
     }
 
@@ -90,14 +91,32 @@ impl BalanceApp {
     /// Esc: drop the popup text.
     pub fn cancel_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let was_editing = self.session.editing().is_some();
-        self.session.cancel();
+        let text = self.editor_text(cx);
+        self.session.cancel(&text);
         self.refocus_if_was_editing(was_editing, window, cx);
         cx.notify();
     }
 
+    /// Enter: in an Add / Remove amount it presses that box's button.
     fn on_editor_enter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(Field::Amount(dir)) = self.session.editing().map(|e| e.field) {
+            return self.adjust(dir, window, cx);
+        }
         let text = self.editor_text(cx);
         let step = self.session.enter(&text);
+        self.apply(step, window, cx);
+    }
+
+    /// Clear (×) next to an Add / Remove amount.
+    pub fn clear_amount(&mut self, dir: Adjust, cx: &mut Context<Self>) {
+        self.session.clear_amount(dir);
+        cx.notify();
+    }
+
+    /// Add / Remove pressed in the asset view.
+    pub fn adjust(&mut self, dir: Adjust, window: &mut Window, cx: &mut Context<Self>) {
+        let text = self.editor_text(cx);
+        let step = self.session.adjust(dir, today(), &text);
         self.apply(step, window, cx);
     }
 

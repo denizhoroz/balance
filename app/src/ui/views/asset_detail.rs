@@ -4,14 +4,19 @@
 //! Opened from the Assets Table `+` on a new draft holding, where each
 //! header field is clicked to edit in place; or from an Assets Table row on
 //! a saved asset, where only its holding's name and category can change.
+//! A saved asset also gets Add / Remove boxes below a line: each changes the
+//! holding by an amount, recorded as a new snapshot dated today so earlier
+//! days keep their values.
 
+use gpui_kit::component::{Icon, IconName};
 use gpui_kit::*;
 
+use crate::core::currency::Currency;
 use crate::core::date::format_date_full;
 use crate::core::money::format_number_dec;
-use crate::core::session::{AssetView, Edit, Field, List};
+use crate::core::session::{Adjust, AssetView, Edit, Field, List};
 use crate::ui::app::{BalanceApp, today};
-use crate::ui::components::{col, row};
+use crate::ui::components::{col, link, row};
 
 /// Big header text (name, value).
 const BIG: f32 = 24.;
@@ -28,6 +33,15 @@ const TYPE_W: f32 = 44.;
 const CATEGORY_W: f32 = 200.;
 const VALUE_W: f32 = 180.;
 const DATE_W: f32 = 90.;
+/// Space above and below the line over the Add / Remove boxes.
+const GAP: f32 = 14.;
+/// Add / Remove box title.
+const TITLE: f32 = 16.;
+/// Add / Remove amount text and button height.
+const AMOUNT: f32 = 14.;
+/// Clear (×) icon next to an amount.
+const CLEAR_W: f32 = 12.;
+const BUTTON_H: f32 = 28.;
 
 impl BalanceApp {
     pub fn render_asset_detail(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -62,11 +76,93 @@ impl BalanceApp {
             .gap(px(SPACE))
             .child(row().h(px(BIG_H)).gap(px(10.)).child(kind.flex_none()).child(value))
             .child(row().h(px(SMALL_H)).child(date));
-        col()
+        let view = col()
             .size_full()
             .px(px(16.))
             .pt(px(14.))
-            .child(row().items_start().gap(px(16.)).child(left).child(right))
+            .child(row().items_start().gap(px(16.)).child(left).child(right));
+        // A saved holding changes by Add / Remove (a new snapshot today); a
+        // draft has nothing to change yet.
+        if !header.editable.contains(&Field::Amount(Adjust::Add)) {
+            return view;
+        }
+        view.child(div().mt(px(GAP)).mb(px(GAP)).h(px(1.)).w_full().bg(p.line)).child(
+            row()
+                .items_start()
+                .gap(px(16.))
+                .child(self.adjust_box(&header, Adjust::Add, currency, cx))
+                .child(self.adjust_box(&header, Adjust::Remove, currency, cx)),
+        )
+    }
+
+    /// One Add / Remove box: title, its amount (click to edit, in the
+    /// holding's own unit), and the button that applies it. The button is
+    /// inert while the amount cannot be applied.
+    fn adjust_box(&self, header: &AssetView, dir: Adjust, currency: Currency, cx: &mut Context<Self>) -> Div {
+        let p = self.palette();
+        let field = Field::Amount(dir);
+        let (title, accent) = match dir {
+            Adjust::Add => ("Add", p.green),
+            Adjust::Remove => ("Remove", p.red),
+        };
+        let editing = header.row.is_some_and(|id| self.session.editing() == Some(Edit { list: List::Asset, id, field }));
+        // Live while typing, so the button follows the editor.
+        let text = if editing { self.editor_text(cx) } else { self.session.amount_text(dir).to_string() };
+        let ready = self.session.adjusted(dir, &text, today()).is_some();
+
+        // Clear (×): only while there is text; its space stays so the
+        // amount does not shift.
+        let clear = div().flex_none().w(px(CLEAR_W)).h_full().flex().items_center();
+        let clear = if text.trim().is_empty() {
+            clear
+        } else {
+            let id = SharedString::from(format!("detail-clear-{title}"));
+            clear.child(
+                link(id, p.muted, p.fg)
+                    .child(Icon::new(IconName::Close).size(px(CLEAR_W)))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.clear_amount(dir, cx))),
+            )
+        };
+
+        let amount = if editing {
+            let input = self.editor_input().text_size(px(AMOUNT)).line_height(relative(LINE)).text_color(p.fg).text_right().px_0().py_0();
+            let id = SharedString::from(format!("detail-{field:?}"));
+            self.editor_shell(field, div().id(id).flex_1().min_w_0().h(px(SMALL_H)).flex().items_center().child(input), cx)
+        } else {
+            let text = Some(text).filter(|t| !t.is_empty());
+            self.header_field(header, field, text, "amount", p.fg, AMOUNT, cx).flex_1().min_w_0().text_right()
+        };
+        let entry = row()
+            .h(px(SMALL_H))
+            .gap(px(8.))
+            .child(clear)
+            .child(amount)
+            .child(div().flex_none().text_size(px(12.)).text_color(p.muted).child(currency.code()));
+
+        let id = SharedString::from(format!("detail-{title}"));
+        let button = row().id(id).h(px(BUTTON_H)).justify_center().border_1().border_color(p.line).rounded(px(4.)).text_size(px(13.)).child(title);
+        let hover = p.selection;
+        let button = if ready {
+            button
+                .cursor_pointer()
+                .text_color(accent)
+                .hover(move |s| s.bg(hover))
+                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.adjust(dir, window, cx)))
+        } else {
+            button.text_color(p.muted.opacity(0.5))
+        };
+
+        col()
+            .flex_1()
+            .min_w_0()
+            .gap(px(SPACE))
+            .p(px(12.))
+            .border_1()
+            .border_color(p.line)
+            .rounded(px(4.))
+            .child(row().h(px(SMALL_H)).justify_center().text_size(px(TITLE)).line_height(relative(LINE)).text_color(p.muted).child(title))
+            .child(entry)
+            .child(button)
     }
 
     /// One header field: its text (gray placeholder when empty), clickable
